@@ -4,29 +4,35 @@ import * as THREE from "three";
 /**
  * VirtualEngine
  *
- * A stylized 3D visualization of the aero piston engine digital twin.
- * Parts of the engine are color-coded live from simulated telemetry:
- *   - Cylinder heads glow by CHT (cylinder head temperature)
- *   - Exhaust manifold glows/pulses by EGT (exhaust gas temperature)
- *   - Flywheel spin speed is driven by RPM
- *   - Whole engine block jitters by vibration_g
- *   - Oil sump tints by oil pressure / oil temperature
+ * 3D visualization + telemetry engine.
  *
  * DATA FLOW:
  *
- * ESP32 / Mock Data
- *       ↓
- * VirtualEngine
- *       ↓
- * Final telemetry object
- *       ├──→ 3D visualization
- *       ├──→ Telemetry panel
- *       └──→ Prediction Dashboard API
+ * LIVE HARDWARE / MOCK DATA
+ *          ↓
+ *    telemetry object
+ *          ↓
+ *     Virtual Engine
+ *          ↓
+ *     Render API
+ *          ↓
+ * Prediction Dashboard
  */
 
-// ============================================================
+// ==========================================================
+// RENDER TELEMETRY API
+// ==========================================================
+
+const TELEMETRY_API =
+  "https://virtual-engine-api.onrender.com/api/telemetry";
+
+// How often telemetry is sent to Render.
+// The engine itself updates every 200 ms.
+const TELEMETRY_SEND_INTERVAL = 200;
+
+// ==========================================================
 // REFERENCE RANGES
-// ============================================================
+// ==========================================================
 
 const BASELINE = {
   rpm: [4800, 5300],
@@ -40,9 +46,9 @@ const BASELINE = {
   injection_deg: [20, 25],
 };
 
-// ============================================================
+// ==========================================================
 // FAULT TYPES
-// ============================================================
+// ==========================================================
 
 const FAULT_TYPES = [
   { id: "none", label: "Normal" },
@@ -54,9 +60,9 @@ const FAULT_TYPES = [
   { id: "combustion_instability", label: "Combustion Instability" },
 ];
 
-// ============================================================
+// ==========================================================
 // MISSION PROFILES
-// ============================================================
+// ==========================================================
 
 const MISSION_PROFILES = [
   { id: "normal_cruise", label: "Normal Cruise" },
@@ -65,75 +71,32 @@ const MISSION_PROFILES = [
   { id: "rapid_throttle", label: "Rapid Throttle" },
 ];
 
-// ============================================================
-// HARDWARE DATA SOURCE CONFIG
-// ============================================================
+// ==========================================================
+// HARDWARE DATA SOURCE
+// ==========================================================
 
 const DEFAULT_HARDWARE_MODE = "live";
 
-// ESP32 WebSocket
 const WS_URL = "ws://esp32-sensor.local:81";
 
-// ============================================================
-// PREDICTION DASHBOARD API
-//
-// This is the ONLY new communication added.
-//
-// Every finalized telemetry reading displayed by this component
-// is also sent to the prediction dashboard.
-//
-// LOCAL TEST:
-// POST http://localhost:5000/api/telemetry
-// ============================================================
-
-const PREDICTION_API_URL = "http://localhost:5000/api/telemetry";
-
-// ============================================================
-// SEND TELEMETRY TO PREDICTION DASHBOARD
-// ============================================================
-
-async function sendTelemetryToPredictionDashboard(telemetryData) {
-  try {
-    await fetch(PREDICTION_API_URL, {
-      method: "POST",
-
-      headers: {
-        "Content-Type": "application/json",
-      },
-
-      body: JSON.stringify(telemetryData),
-    });
-  } catch (error) {
-    // Do not crash the VirtualEngine if the prediction
-    // dashboard is unavailable.
-    console.warn(
-      "Prediction dashboard unavailable:",
-      error.message
-    );
-  }
-}
-
-// ============================================================
+// ==========================================================
 // HARDWARE FIELD CONFIG
-// ============================================================
+// ==========================================================
 
 const HARDWARE_FIELD_CONFIG = {
   vibration_g: {
     available: true,
-    sensor:
-      "MPU6050 (accelerometer, high-frequency component)",
+    sensor: "MPU6050 (accelerometer, high-frequency component)",
   },
 
   roll_deg: {
     available: true,
-    sensor:
-      "MPU6050 (accelerometer, tilt/gravity vector)",
+    sensor: "MPU6050 (accelerometer, tilt/gravity vector)",
   },
 
   pitch_deg: {
     available: true,
-    sensor:
-      "MPU6050 (accelerometer, tilt/gravity vector)",
+    sensor: "MPU6050 (accelerometer, tilt/gravity vector)",
   },
 
   yaw_deg: {
@@ -144,26 +107,22 @@ const HARDWARE_FIELD_CONFIG = {
 
   rpm: {
     available: true,
-    sensor:
-      "IR Wide Optical Slot Sensor (pulse counting on a slotted disc)",
+    sensor: "IR Wide Optical Slot Sensor (pulse counting on a slotted disc)",
   },
 
   cht_c: {
     available: true,
-    sensor:
-      "LM35 (analog temperature sensor)",
+    sensor: "LM35 (analog temperature sensor)",
   },
 };
 
-const HARDWARE_FIELDS = Object.entries(
-  HARDWARE_FIELD_CONFIG
-)
+const HARDWARE_FIELDS = Object.entries(HARDWARE_FIELD_CONFIG)
   .filter(([, cfg]) => cfg.available)
   .map(([field]) => field);
 
-// ============================================================
-// DESIGN TOKENS
-// ============================================================
+// ==========================================================
+// DESIGN COLORS
+// ==========================================================
 
 const COLORS = {
   bg: "#0a0c10",
@@ -179,9 +138,9 @@ const COLORS = {
   red: "#ff5b5b",
 };
 
-// ============================================================
-// RANDOM / SIMULATION HELPERS
-// ============================================================
+// ==========================================================
+// HELPERS
+// ==========================================================
 
 function randIn([lo, hi]) {
   return lo + Math.random() * (hi - lo);
@@ -207,33 +166,22 @@ function baseReading() {
   return r;
 }
 
-// ============================================================
-// APPLY FAULT
-// ============================================================
+// ==========================================================
+// FAULT APPLICATION
+// ==========================================================
 
-function applyFault(
-  r,
-  fault,
-  secondsSinceFaultStart
-) {
+function applyFault(r, fault, secondsSinceFaultStart) {
   switch (fault) {
     case "misfire":
-
       if (Math.random() < 0.15) {
         r.rpm -= 400 + Math.random() * 500;
-
-        r.egt_c +=
-          60 + Math.random() * 80;
-
-        r.vibration_g +=
-          0.1 + Math.random() * 0.2;
+        r.egt_c += 60 + Math.random() * 80;
+        r.vibration_g += 0.1 + Math.random() * 0.2;
       }
-
       break;
 
     case "injector_abnormality": {
-      const expected =
-        14 + (r.rpm - 4800) / 500;
+      const expected = 14 + (r.rpm - 4800) / 500;
 
       r.fuel_flow_lph = Math.max(
         2,
@@ -246,7 +194,6 @@ function applyFault(
     }
 
     case "coking_degradation": {
-
       const drift = Math.min(
         secondsSinceFaultStart * 0.35,
         25
@@ -259,7 +206,6 @@ function applyFault(
     }
 
     case "lubrication_issue": {
-
       const drift = Math.min(
         secondsSinceFaultStart * 0.06,
         2.5
@@ -272,7 +218,6 @@ function applyFault(
     }
 
     case "sensor_drift": {
-
       const drift = Math.min(
         secondsSinceFaultStart * 0.6,
         40
@@ -284,13 +229,11 @@ function applyFault(
     }
 
     case "combustion_instability":
-
       r.vibration_g += Math.abs(
         gaussianNoise() * 0.12
       );
 
-      r.rpm +=
-        gaussianNoise() * 120;
+      r.rpm += gaussianNoise() * 120;
 
       break;
 
@@ -301,35 +244,25 @@ function applyFault(
   return r;
 }
 
-// ============================================================
-// APPLY MISSION PROFILE
-// ============================================================
+// ==========================================================
+// MISSION PROFILE
+// ==========================================================
 
-function applyMissionProfile(
-  r,
-  profile
-) {
+function applyMissionProfile(r, profile) {
   switch (profile) {
-
     case "high_altitude":
-
       r.cht_c += 12;
       r.egt_c += 20;
       r.oil_press_bar -= 0.3;
-
       break;
 
     case "hot_weather":
-
       r.cht_c += 15;
       r.oil_temp_c += 12;
-
       break;
 
     case "rapid_throttle":
-
-      r.rpm +=
-        gaussianNoise() * 250;
+      r.rpm += gaussianNoise() * 250;
 
       r.vibration_g += Math.abs(
         gaussianNoise() * 0.08
@@ -344,34 +277,23 @@ function applyMissionProfile(
   return r;
 }
 
-// ============================================================
+// ==========================================================
 // NORMALIZE
-// ============================================================
+// ==========================================================
 
-function normalize(
-  val,
-  [lo, hi]
-) {
+function normalize(val, [lo, hi]) {
   return Math.max(
     0,
-    Math.min(
-      1,
-      (val - lo) / (hi - lo)
-    )
+    Math.min(1, (val - lo) / (hi - lo))
   );
 }
 
-// ============================================================
+// ==========================================================
 // RANDOM WALK
-// ============================================================
+// ==========================================================
 
-function stepWalk(
-  prev,
-  band,
-  stepScale = 0.06
-) {
+function stepWalk(prev, band, stepScale = 0.06) {
   const [lo, hi] = band;
-
   const range = hi - lo;
 
   const next =
@@ -382,33 +304,22 @@ function stepWalk(
 
   return Math.max(
     lo - range * 0.15,
-    Math.min(
-      hi + range * 0.15,
-      next
-    )
+    Math.min(hi + range * 0.15, next)
   );
 }
 
-// ============================================================
-// COMPUTE TILT FROM ACCELEROMETER
-// ============================================================
+// ==========================================================
+// ACCELEROMETER HELPERS
+// ==========================================================
 
-function computeTiltFromAccel(
-  ax,
-  ay,
-  az
-) {
+function computeTiltFromAccel(ax, ay, az) {
   const roll_deg =
-    (Math.atan2(ay, az) * 180) /
-    Math.PI;
+    (Math.atan2(ay, az) * 180) / Math.PI;
 
   const pitch_deg =
     (Math.atan2(
       -ax,
-      Math.sqrt(
-        ay * ay +
-          az * az
-      )
+      Math.sqrt(ay * ay + az * az)
     ) *
       180) /
     Math.PI;
@@ -419,57 +330,40 @@ function computeTiltFromAccel(
   };
 }
 
-// ============================================================
-// COMPUTE VIBRATION
-// ============================================================
-
 function computeVibrationFromAccelBuffer(
   accelSamples
 ) {
-  if (!accelSamples.length) {
-    return 0;
-  }
+  if (!accelSamples.length) return 0;
 
-  const magnitudes =
-    accelSamples.map(
-      ({ ax, ay, az }) =>
-        Math.sqrt(
-          ax * ax +
-            ay * ay +
-            az * az
-        )
-    );
+  const magnitudes = accelSamples.map(
+    ({ ax, ay, az }) =>
+      Math.sqrt(
+        ax * ax +
+          ay * ay +
+          az * az
+      )
+  );
 
-  const withoutGravity =
-    magnitudes.map(
-      (m) =>
-        Math.abs(m - 1.0)
-    );
+  const withoutGravity = magnitudes.map(
+    (m) => Math.abs(m - 1.0)
+  );
 
   const mean =
     withoutGravity.reduce(
       (a, b) => a + b,
       0
-    ) /
-    withoutGravity.length;
+    ) / withoutGravity.length;
 
   return mean;
 }
 
-// ============================================================
-// LERP COLOR
-// ============================================================
+// ==========================================================
+// COLOR INTERPOLATION
+// ==========================================================
 
-function lerpColor(
-  c1,
-  c2,
-  t
-) {
-  const a =
-    new THREE.Color(c1);
-
-  const b =
-    new THREE.Color(c2);
+function lerpColor(c1, c2, t) {
+  const a = new THREE.Color(c1);
+  const b = new THREE.Color(c2);
 
   return a.lerp(
     b,
@@ -480,65 +374,110 @@ function lerpColor(
   );
 }
 
-// ============================================================
-// VIRTUAL ENGINE
-// ============================================================
+// ==========================================================
+// SEND TELEMETRY TO RENDER
+// ==========================================================
+
+async function sendTelemetryToServer(
+  telemetry,
+  metadata = {}
+) {
+  try {
+    const payload = {
+      ...telemetry,
+
+      // Additional information useful for
+      // the prediction dashboard.
+      data_source: metadata.data_source || "unknown",
+      fault: metadata.fault || "none",
+      mission_profile:
+        metadata.mission_profile ||
+        "normal_cruise",
+      anomaly_score:
+        typeof metadata.anomaly_score ===
+        "number"
+          ? Number(
+              metadata.anomaly_score.toFixed(4)
+            )
+          : 0,
+
+      status: metadata.status || "Normal",
+
+      timestamp:
+        new Date().toISOString(),
+    };
+
+    const response = await fetch(
+      TELEMETRY_API,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json",
+        },
+
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        "Telemetry API error:",
+        response.status
+      );
+    }
+  } catch (error) {
+    console.error(
+      "Could not send telemetry to Render:",
+      error
+    );
+  }
+}
+
+// ==========================================================
+// MAIN COMPONENT
+// ==========================================================
 
 export default function VirtualEngine() {
+  const mountRef = useRef(null);
 
-  const mountRef =
-    useRef(null);
+  const threeRef = useRef({});
 
-  const threeRef =
-    useRef({});
+  const simRef = useRef({
+    activeFault: "none",
 
-  const simRef =
-    useRef({
+    missionProfile:
+      "normal_cruise",
 
-      activeFault:
-        "none",
+    faultStartTime: null,
 
-      missionProfile:
-        "normal_cruise",
+    anomalyScore: 0,
 
-      faultStartTime:
-        null,
+    scoreHistory: [],
 
-      anomalyScore:
-        0,
+    reading: baseReading(),
+  });
 
-      scoreHistory:
-        [],
+  // ========================================================
+  // HARDWARE STATE
+  // ========================================================
 
-      reading:
-        baseReading(),
-    });
+  const hardwareRef = useRef({
+    rpm: randIn(BASELINE.rpm),
 
-  // ==========================================================
-  // HARDWARE DATA
-  // ==========================================================
+    vibration_g:
+      randIn(BASELINE.vibration_g),
 
-  const hardwareRef =
-    useRef({
+    cht_c:
+      randIn(BASELINE.cht_c),
 
-      rpm:
-        randIn(BASELINE.rpm),
+    roll_deg: 0,
 
-      vibration_g:
-        randIn(BASELINE.vibration_g),
+    pitch_deg: 0,
 
-      cht_c:
-        randIn(BASELINE.cht_c),
-
-      roll_deg:
-        0,
-
-      pitch_deg:
-        0,
-
-      yaw_deg:
-        0,
-    });
+    yaw_deg: 0,
+  });
 
   const accelBufferRef =
     useRef([]);
@@ -560,22 +499,22 @@ export default function VirtualEngine() {
       : "Connecting to ESP32..."
   );
 
-  const [
-    telemetry,
-    setTelemetry,
-  ] = useState(
-    simRef.current.reading
-  );
+  // ========================================================
+  // TELEMETRY STATE
+  // ========================================================
+
+  const [telemetry, setTelemetry] =
+    useState(
+      simRef.current.reading
+    );
 
   const [
     anomalyScore,
     setAnomalyScore,
   ] = useState(0);
 
-  const [
-    status,
-    setStatus,
-  ] = useState("Normal");
+  const [status, setStatus] =
+    useState("Normal");
 
   const [
     reliability,
@@ -596,134 +535,108 @@ export default function VirtualEngine() {
     "normal_cruise"
   );
 
-  const [
-    paused,
-    setPaused,
-  ] = useState(false);
+  const [paused, setPaused] =
+    useState(false);
 
-  const [
-    soundOn,
-    setSoundOn,
-  ] = useState(false);
+  const [soundOn, setSoundOn] =
+    useState(false);
 
   const soundOnRef =
     useRef(false);
 
   useEffect(() => {
-
     soundOnRef.current =
       soundOn;
-
   }, [soundOn]);
 
-  const audioRef =
-    useRef({});
+  const audioRef = useRef({});
 
-  // ==========================================================
+  // ========================================================
   // AUDIO
-  // ==========================================================
+  // ========================================================
 
-  const initAudio =
-    useCallback(() => {
+  const initAudio = useCallback(() => {
+    if (audioRef.current.ctx)
+      return;
 
-      if (audioRef.current.ctx) {
-        return;
-      }
+    const ctx =
+      new (window.AudioContext ||
+        window.webkitAudioContext)();
 
-      const ctx =
-        new (
-          window.AudioContext ||
-          window.webkitAudioContext
-        )();
+    const engineOsc =
+      ctx.createOscillator();
 
-      const engineOsc =
-        ctx.createOscillator();
+    engineOsc.type =
+      "sawtooth";
 
-      engineOsc.type =
-        "sawtooth";
+    const subOsc =
+      ctx.createOscillator();
 
-      const subOsc =
-        ctx.createOscillator();
+    subOsc.type = "square";
 
-      subOsc.type =
-        "square";
+    const filter =
+      ctx.createBiquadFilter();
 
-      const filter =
-        ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value =
+      400;
 
-      filter.type =
-        "lowpass";
+    const engineGain =
+      ctx.createGain();
 
-      filter.frequency.value =
-        400;
+    engineGain.gain.value =
+      0.0001;
 
-      const engineGain =
-        ctx.createGain();
+    engineOsc.connect(filter);
+    subOsc.connect(filter);
 
-      engineGain.gain.value =
-        0.0001;
+    filter.connect(
+      engineGain
+    );
 
-      engineOsc.connect(filter);
+    engineGain.connect(
+      ctx.destination
+    );
 
-      subOsc.connect(filter);
+    engineOsc.start();
+    subOsc.start();
 
-      filter.connect(
-        engineGain
-      );
+    const alertOsc =
+      ctx.createOscillator();
 
-      engineGain.connect(
-        ctx.destination
-      );
+    alertOsc.type = "sine";
+    alertOsc.frequency.value =
+      880;
 
-      engineOsc.start();
+    const alertGain =
+      ctx.createGain();
 
-      subOsc.start();
+    alertGain.gain.value = 0;
 
-      const alertOsc =
-        ctx.createOscillator();
+    alertOsc.connect(
+      alertGain
+    );
 
-      alertOsc.type =
-        "sine";
+    alertGain.connect(
+      ctx.destination
+    );
 
-      alertOsc.frequency.value =
-        880;
+    alertOsc.start();
 
-      const alertGain =
-        ctx.createGain();
-
-      alertGain.gain.value =
-        0;
-
-      alertOsc.connect(
-        alertGain
-      );
-
-      alertGain.connect(
-        ctx.destination
-      );
-
-      alertOsc.start();
-
-      audioRef.current = {
-        ctx,
-        engineOsc,
-        subOsc,
-        filter,
-        engineGain,
-        alertOsc,
-        alertGain,
-        beepPhase: 0,
-      };
-
-    }, []);
-
-  // ==========================================================
-  // SOUND TOGGLE
-  // ==========================================================
+    audioRef.current = {
+      ctx,
+      engineOsc,
+      subOsc,
+      filter,
+      engineGain,
+      alertOsc,
+      alertGain,
+      beepPhase: 0,
+    };
+  }, []);
 
   const toggleSound =
     useCallback(() => {
-
       initAudio();
 
       const a =
@@ -737,9 +650,7 @@ export default function VirtualEngine() {
       }
 
       setSoundOn((on) => {
-
         if (a.engineGain) {
-
           a.engineGain.gain.setTargetAtTime(
             on
               ? 0.0001
@@ -751,16 +662,14 @@ export default function VirtualEngine() {
 
         return !on;
       });
-
     }, [initAudio]);
 
-  // ==========================================================
-  // SET FAULT
-  // ==========================================================
+  // ========================================================
+  // FAULT
+  // ========================================================
 
   const setFault =
     useCallback((id) => {
-
       simRef.current.activeFault =
         id;
 
@@ -770,7 +679,6 @@ export default function VirtualEngine() {
           : Date.now();
 
       if (id === "none") {
-
         simRef.current.anomalyScore =
           0;
 
@@ -779,53 +687,42 @@ export default function VirtualEngine() {
       }
 
       setActiveFault(id);
-
     }, []);
 
-  // ==========================================================
-  // SET MISSION
-  // ==========================================================
+  // ========================================================
+  // MISSION
+  // ========================================================
 
   const setMission =
     useCallback((id) => {
-
       simRef.current.missionProfile =
         id;
 
       setMissionProfile(id);
-
     }, []);
 
-  // ==========================================================
+  // ========================================================
   // HARDWARE DATA SOURCE
-  // ==========================================================
+  // ========================================================
 
   useEffect(() => {
-
-    // ========================================================
-    // MOCK MODE
-    // ========================================================
-
     if (
       hardwareMode ===
       "mock"
     ) {
-
       setDataSourceStatus(
         "Mock hardware (manual mock mode)"
       );
 
       const walk =
         setInterval(() => {
-
           const h =
             hardwareRef.current;
 
-          h.rpm =
-            stepWalk(
-              h.rpm,
-              BASELINE.rpm
-            );
+          h.rpm = stepWalk(
+            h.rpm,
+            BASELINE.rpm
+          );
 
           h.vibration_g =
             Math.max(
@@ -868,124 +765,166 @@ export default function VirtualEngine() {
             );
 
           h.yaw_deg =
-            (
-              h.yaw_deg +
+            (h.yaw_deg +
               (Math.random() -
                 0.5) *
                 3 +
-              360
-            ) %
+              360) %
             360;
-
         }, 200);
 
       return () =>
         clearInterval(walk);
     }
 
-    // ========================================================
-    // LIVE ESP32 MODE
-    // ========================================================
+    // ======================================================
+    // LIVE ESP32
+    // ======================================================
 
     let ws;
 
     let reconnectTimer;
 
-    let cancelled =
-      false;
+    let cancelled = false;
 
-    const connect =
-      () => {
+    const connect = () => {
+      if (cancelled)
+        return;
 
-        if (cancelled) {
-          return;
-        }
+      setDataSourceStatus(
+        "Connecting to ESP32..."
+      );
 
-        setDataSourceStatus(
-          "Connecting to ESP32..."
+      try {
+        ws = new WebSocket(
+          WS_URL
         );
 
-        ws =
-          new WebSocket(
-            WS_URL
+        ws.onopen = () =>
+          setDataSourceStatus(
+            "Live -- ESP32 connected"
           );
 
-        ws.onopen =
-          () => {
+        ws.onmessage = (
+          evt
+        ) => {
+          try {
+            const msg =
+              JSON.parse(
+                evt.data
+              );
 
-            setDataSourceStatus(
-              "Live -- ESP32 connected"
-            );
-
-          };
-
-        ws.onmessage =
-          (evt) => {
-
-            try {
-
-              const msg =
-                JSON.parse(
-                  evt.data
-                );
-
-              for (
-                const field of
-                HARDWARE_FIELDS
+            for (const field of HARDWARE_FIELDS) {
+              if (
+                typeof msg[field] ===
+                "number"
               ) {
+                hardwareRef.current[
+                  field
+                ] = msg[field];
+              }
+            }
 
-                if (
-                  typeof msg[field] ===
-                  "number"
-                ) {
-
-                  hardwareRef.current[
-                    field
-                  ] =
-                    msg[field];
+            // Optional raw accelerometer support
+            if (
+              typeof msg.ax ===
+                "number" &&
+              typeof msg.ay ===
+                "number" &&
+              typeof msg.az ===
+                "number"
+            ) {
+              accelBufferRef.current.push(
+                {
+                  ax: msg.ax,
+                  ay: msg.ay,
+                  az: msg.az,
                 }
+              );
+
+              if (
+                accelBufferRef.current
+                  .length > 20
+              ) {
+                accelBufferRef.current.shift();
               }
 
-            } catch {
+              const tilt =
+                computeTiltFromAccel(
+                  msg.ax,
+                  msg.ay,
+                  msg.az
+                );
 
-              // Ignore malformed
-              // packets.
+              if (
+                !HARDWARE_FIELD_CONFIG
+                  .roll_deg
+                  .available
+              ) {
+                hardwareRef.current.roll_deg =
+                  tilt.roll_deg;
+              }
 
+              if (
+                !HARDWARE_FIELD_CONFIG
+                  .pitch_deg
+                  .available
+              ) {
+                hardwareRef.current.pitch_deg =
+                  tilt.pitch_deg;
+              }
+
+              if (
+                !HARDWARE_FIELD_CONFIG
+                  .vibration_g
+                  .available
+              ) {
+                hardwareRef.current.vibration_g =
+                  computeVibrationFromAccelBuffer(
+                    accelBufferRef.current
+                  );
+              }
             }
-          };
+          } catch {
+            // Ignore malformed packets
+          }
+        };
 
-        ws.onclose =
-          () => {
+        ws.onclose = () => {
+          if (cancelled)
+            return;
 
-            if (cancelled) {
-              return;
-            }
+          setDataSourceStatus(
+            "Signal lost -- reconnecting... (showing last known values)"
+          );
 
-            setDataSourceStatus(
-              "Signal lost -- reconnecting... (showing last known values)"
+          reconnectTimer =
+            setTimeout(
+              connect,
+              1500
             );
+        };
 
-            reconnectTimer =
-              setTimeout(
-                connect,
-                1500
-              );
-          };
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+      } catch {
+        setDataSourceStatus(
+          "ESP32 connection failed -- retrying..."
+        );
 
-        ws.onerror =
-          () => {
-
-            ws.close();
-
-          };
-      };
+        reconnectTimer =
+          setTimeout(
+            connect,
+            1500
+          );
+      }
+    };
 
     connect();
 
     return () => {
-
-      cancelled =
-        true;
+      cancelled = true;
 
       clearTimeout(
         reconnectTimer
@@ -995,52 +934,57 @@ export default function VirtualEngine() {
         ws.close();
       }
     };
-
   }, [hardwareMode]);
 
-  // ==========================================================
-  // SIMULATION / TELEMETRY TICK
-  // ==========================================================
+  // ========================================================
+  // SIMULATION + TELEMETRY TRANSMISSION
+  // ========================================================
 
   useEffect(() => {
-
-    if (paused) {
+    if (paused)
       return;
-    }
 
     const interval =
       setInterval(() => {
-
         const s =
           simRef.current;
+
+        // --------------------------------------------------
+        // BASE READING
+        // --------------------------------------------------
 
         let r =
           baseReading();
 
         const secondsSinceFault =
           s.faultStartTime
-            ? (
-                Date.now() -
-                s.faultStartTime
-              ) / 1000
+            ? (Date.now() -
+                s.faultStartTime) /
+              1000
             : 0;
 
-        r =
-          applyFault(
-            r,
-            s.activeFault,
-            secondsSinceFault
-          );
+        // --------------------------------------------------
+        // FAULT
+        // --------------------------------------------------
 
-        r =
-          applyMissionProfile(
-            r,
-            s.missionProfile
-          );
+        r = applyFault(
+          r,
+          s.activeFault,
+          secondsSinceFault
+        );
 
-        // ====================================================
-        // OVERLAY HARDWARE DATA
-        // ====================================================
+        // --------------------------------------------------
+        // MISSION
+        // --------------------------------------------------
+
+        r = applyMissionProfile(
+          r,
+          s.missionProfile
+        );
+
+        // --------------------------------------------------
+        // HARDWARE OVERLAY
+        // --------------------------------------------------
 
         const faultTouchesHardwareField =
           s.activeFault ===
@@ -1048,14 +992,11 @@ export default function VirtualEngine() {
           s.activeFault ===
             "combustion_instability";
 
-        for (
-          const field of
-          HARDWARE_FIELDS
-        ) {
-
+        for (const field of HARDWARE_FIELDS) {
           if (
             faultTouchesHardwareField &&
-            field === "vibration_g"
+            field ===
+              "vibration_g"
           ) {
             continue;
           }
@@ -1073,29 +1014,27 @@ export default function VirtualEngine() {
             ];
         }
 
-        // ====================================================
+        // --------------------------------------------------
         // ANOMALY SCORE
-        // ====================================================
+        // --------------------------------------------------
 
-        let target =
-          0;
+        let target = 0;
 
         if (
           s.activeFault !==
           "none"
         ) {
-
           const egtMid =
-            (
-              BASELINE.egt_c[0] +
-              BASELINE.egt_c[1]
-            ) / 2;
+            (BASELINE.egt_c[0] +
+              BASELINE.egt_c[1]) /
+            2;
 
           const vibMid =
-            (
-              BASELINE.vibration_g[0] +
-              BASELINE.vibration_g[1]
-            ) / 2;
+            (BASELINE
+              .vibration_g[0] +
+              BASELINE
+                .vibration_g[1]) /
+            2;
 
           const egtDev =
             Math.abs(
@@ -1119,10 +1058,8 @@ export default function VirtualEngine() {
         }
 
         s.anomalyScore +=
-          (
-            target -
-            s.anomalyScore
-          ) *
+          (target -
+            s.anomalyScore) *
           0.15;
 
         const score =
@@ -1134,9 +1071,9 @@ export default function VirtualEngine() {
             )
           );
 
-        // ====================================================
+        // --------------------------------------------------
         // RELIABILITY
-        // ====================================================
+        // --------------------------------------------------
 
         const now =
           Date.now();
@@ -1149,27 +1086,24 @@ export default function VirtualEngine() {
         while (
           s.scoreHistory.length &&
           now -
-            s.scoreHistory[0].t >
+            s.scoreHistory[0]
+              .t >
             4000
         ) {
-
           s.scoreHistory.shift();
-
         }
 
         let reliabilityText =
           "Stable, no degradation trend detected";
 
         if (score >= 0.95) {
-
           reliabilityText =
             "Critical -- immediate attention";
-
         } else if (
           score >= 0.15 &&
-          s.scoreHistory.length > 1
+          s.scoreHistory.length >
+            1
         ) {
-
           const t0 =
             s.scoreHistory[0].t;
 
@@ -1211,14 +1145,12 @@ export default function VirtualEngine() {
             i < n;
             i++
           ) {
-
             num +=
               (xs[i] - mx) *
               (ys[i] - my);
 
             den +=
-              (xs[i] - mx) **
-              2;
+              (xs[i] - mx) ** 2;
           }
 
           const rate =
@@ -1232,63 +1164,56 @@ export default function VirtualEngine() {
               1000 >=
               2.5
           ) {
-
             const remaining =
               (0.95 - score) /
               rate;
 
             if (
               remaining >= 0 &&
-              remaining <= 3600
+              remaining <=
+                3600
             ) {
-
               reliabilityText =
                 remaining < 60
                   ? "Estimated <1 min to critical threshold at current degradation rate"
                   : `Estimated ~${Math.round(
-                      remaining / 60
+                      remaining /
+                        60
                     )} min to critical threshold at current degradation rate`;
             }
           }
         }
 
-        // ====================================================
-        // SAVE FINAL READING
-        // ====================================================
+        // --------------------------------------------------
+        // STATUS
+        // --------------------------------------------------
 
-        s.reading =
-          r;
+        const newStatus =
+          score < 0.3
+            ? "Normal"
+            : score < 0.65
+            ? "Warning"
+            : "Critical";
 
-        threeRef.current.latest = {
-          reading: r,
-          score,
-          fault:
-            s.activeFault,
-          mission:
-            s.missionProfile,
-        };
+        // --------------------------------------------------
+        // SAVE
+        // --------------------------------------------------
 
-        // ====================================================
-        // SEND EXACT SAME TELEMETRY TO PREDICTION DASHBOARD
-        //
-        // IMPORTANT:
-        // `r` is the FINAL telemetry object.
-        //
-        // Therefore the prediction dashboard receives
-        // the same data source that drives the VirtualEngine.
-        // ====================================================
+        s.reading = r;
 
-        const predictionPayload = {
-          ...r,
-        };
+        threeRef.current.latest =
+          {
+            reading: r,
+            score,
+            fault:
+              s.activeFault,
+            mission:
+              s.missionProfile,
+          };
 
-        sendTelemetryToPredictionDashboard(
-          predictionPayload
-        );
-
-        // ====================================================
-        // UPDATE VIRTUAL ENGINE UI
-        // ====================================================
+        // --------------------------------------------------
+        // REACT STATE
+        // --------------------------------------------------
 
         setTelemetry({
           ...r,
@@ -1298,13 +1223,6 @@ export default function VirtualEngine() {
           score
         );
 
-        const newStatus =
-          score < 0.3
-            ? "Normal"
-            : score < 0.65
-            ? "Warning"
-            : "Critical";
-
         setStatus(
           newStatus
         );
@@ -1313,9 +1231,36 @@ export default function VirtualEngine() {
           reliabilityText
         );
 
-        // ====================================================
+        // ==================================================
+        // SEND EXACT CURRENT TELEMETRY TO RENDER
+        // ==================================================
+
+        sendTelemetryToServer(
+          r,
+          {
+            data_source:
+              hardwareMode ===
+              "live"
+                ? "live_hardware"
+                : "mock_data",
+
+            fault:
+              s.activeFault,
+
+            mission_profile:
+              s.missionProfile,
+
+            anomaly_score:
+              score,
+
+            status:
+              newStatus,
+          }
+        );
+
+        // --------------------------------------------------
         // AUDIO
-        // ====================================================
+        // --------------------------------------------------
 
         const a =
           audioRef.current;
@@ -1324,18 +1269,15 @@ export default function VirtualEngine() {
           a.ctx &&
           soundOnRef.current
         ) {
-
           const t0 =
             a.ctx.currentTime;
 
           const rpmFrac =
-            r.rpm /
-            5500;
+            r.rpm / 5500;
 
           const baseFreq =
             32 +
-            rpmFrac *
-              95;
+            rpmFrac * 95;
 
           a.engineOsc.frequency.setTargetAtTime(
             baseFreq,
@@ -1344,8 +1286,7 @@ export default function VirtualEngine() {
           );
 
           a.subOsc.frequency.setTargetAtTime(
-            baseFreq *
-              1.5,
+            baseFreq * 1.5,
             t0,
             0.08
           );
@@ -1407,22 +1348,22 @@ export default function VirtualEngine() {
             0.1
           );
         }
-
       }, 200);
 
     return () =>
       clearInterval(
         interval
       );
+  }, [
+    paused,
+    hardwareMode,
+  ]);
 
-  }, [paused]);
-
-  // ==========================================================
+  // ========================================================
   // THREE.JS SCENE
-  // ==========================================================
+  // ========================================================
 
   useEffect(() => {
-
     const mount =
       mountRef.current;
 
@@ -1455,18 +1396,12 @@ export default function VirtualEngine() {
         100
       );
 
-    let camTheta =
-      0.55;
-
-    let camPhi =
-      1.2;
-
-    let camRadius =
-      13.5;
+    let camTheta = 0.55;
+    let camPhi = 1.2;
+    let camRadius = 13.5;
 
     const updateCamera =
       () => {
-
         camera.position.set(
           camRadius *
             Math.sin(
@@ -1501,8 +1436,7 @@ export default function VirtualEngine() {
 
     const renderer =
       new THREE.WebGLRenderer({
-        antialias:
-          true,
+        antialias: true,
       });
 
     renderer.setSize(
@@ -1521,9 +1455,9 @@ export default function VirtualEngine() {
       renderer.domElement
     );
 
-    // ========================================================
+    // ======================================================
     // LIGHTING
-    // ========================================================
+    // ======================================================
 
     scene.add(
       new THREE.AmbientLight(
@@ -1574,9 +1508,9 @@ export default function VirtualEngine() {
 
     scene.add(fill);
 
-    // ========================================================
-    // GROUND GRID
-    // ========================================================
+    // ======================================================
+    // GRID
+    // ======================================================
 
     const grid =
       new THREE.GridHelper(
@@ -1591,9 +1525,9 @@ export default function VirtualEngine() {
 
     scene.add(grid);
 
-    // ========================================================
-    // ENGINE
-    // ========================================================
+    // ======================================================
+    // ENGINE GROUP
+    // ======================================================
 
     const engine =
       new THREE.Group();
@@ -1602,27 +1536,21 @@ export default function VirtualEngine() {
 
     const metalMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x5c6875,
-        metalness:
-          0.72,
-        roughness:
-          0.32,
+        color: 0x5c6875,
+        metalness: 0.72,
+        roughness: 0.32,
       });
 
     const darkMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x272e37,
-        metalness:
-          0.5,
-        roughness:
-          0.5,
+        color: 0x272e37,
+        metalness: 0.5,
+        roughness: 0.5,
       });
 
-    // ========================================================
+    // ======================================================
     // ENGINE BLOCK
-    // ========================================================
+    // ======================================================
 
     const block =
       new THREE.Mesh(
@@ -1642,9 +1570,9 @@ export default function VirtualEngine() {
 
     engine.add(block);
 
-    // ========================================================
-    // CYLINDER HEADS
-    // ========================================================
+    // ======================================================
+    // CYLINDERS
+    // ======================================================
 
     const cylMats = [];
     const cylMeshes = [];
@@ -1654,19 +1582,13 @@ export default function VirtualEngine() {
       i < 4;
       i++
     ) {
-
       const mat =
         new THREE.MeshStandardMaterial({
-          color:
-            0x707c8a,
-          metalness:
-            0.55,
-          roughness:
-            0.35,
-          emissive:
-            0x2a1a10,
-          emissiveIntensity:
-            0.4,
+          color: 0x707c8a,
+          metalness: 0.55,
+          roughness: 0.35,
+          emissive: 0x2a1a10,
+          emissiveIntensity: 0.4,
         });
 
       const mesh =
@@ -1688,29 +1610,20 @@ export default function VirtualEngine() {
 
       engine.add(mesh);
 
-      cylMats.push(
-        mat
-      );
-
-      cylMeshes.push(
-        mesh
-      );
+      cylMats.push(mat);
+      cylMeshes.push(mesh);
     }
 
-    // ========================================================
-    // EXHAUST MANIFOLD
-    // ========================================================
+    // ======================================================
+    // EXHAUST
+    // ======================================================
 
     const exhaustMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x363c43,
-        metalness:
-          0.78,
-        roughness:
-          0.25,
-        emissive:
-          0x000000,
+        color: 0x363c43,
+        metalness: 0.78,
+        roughness: 0.25,
+        emissive: 0x000000,
       });
 
     const exhaustPipe =
@@ -1762,18 +1675,15 @@ export default function VirtualEngine() {
       exhaustBend
     );
 
-    // ========================================================
+    // ======================================================
     // FLYWHEEL
-    // ========================================================
+    // ======================================================
 
     const flywheelMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x8a95a3,
-        metalness:
-          0.82,
-        roughness:
-          0.22,
+        color: 0x8a95a3,
+        metalness: 0.82,
+        roughness: 0.22,
       });
 
     const flywheel =
@@ -1805,7 +1715,6 @@ export default function VirtualEngine() {
       i < 4;
       i++
     ) {
-
       const spoke =
         new THREE.Mesh(
           new THREE.BoxGeometry(
@@ -1825,20 +1734,16 @@ export default function VirtualEngine() {
       );
     }
 
-    // ========================================================
+    // ======================================================
     // OIL SUMP
-    // ========================================================
+    // ======================================================
 
     const sumpMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x2f5f8a,
-        metalness:
-          0.3,
-        roughness:
-          0.5,
-        emissive:
-          0x000000,
+        color: 0x2f5f8a,
+        metalness: 0.3,
+        roughness: 0.5,
+        emissive: 0x000000,
       });
 
     const sump =
@@ -1857,13 +1762,11 @@ export default function VirtualEngine() {
       0
     );
 
-    engine.add(
-      sump
-    );
+    engine.add(sump);
 
-    // ========================================================
-    // BASE PLATFORM
-    // ========================================================
+    // ======================================================
+    // PLATFORM
+    // ======================================================
 
     const platform =
       new THREE.Mesh(
@@ -1891,40 +1794,30 @@ export default function VirtualEngine() {
       0
     );
 
-    // ========================================================
+    // ======================================================
     // AIRFRAME
-    // ========================================================
+    // ======================================================
 
     const airframe =
       new THREE.Group();
 
     const skinMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x8fa4b8,
-        transparent:
-          true,
-        opacity:
-          0.13,
-        roughness:
-          0.5,
-        side:
-          THREE.DoubleSide,
+        color: 0x8fa4b8,
+        transparent: true,
+        opacity: 0.13,
+        roughness: 0.5,
+        side: THREE.DoubleSide,
       });
 
     const wireMat =
       new THREE.LineBasicMaterial({
-        color:
-          0x4fd8ff,
-        transparent:
-          true,
-        opacity:
-          0.35,
+        color: 0x4fd8ff,
+        transparent: true,
+        opacity: 0.35,
       });
 
-    // ========================================================
     // FUSELAGE
-    // ========================================================
 
     const fuselage =
       new THREE.Mesh(
@@ -1959,9 +1852,7 @@ export default function VirtualEngine() {
       )
     );
 
-    // ========================================================
-    // WINGS
-    // ========================================================
+    // WING
 
     const wingGeo =
       new THREE.BoxGeometry(
@@ -1982,9 +1873,7 @@ export default function VirtualEngine() {
       0
     );
 
-    airframe.add(
-      wing
-    );
+    airframe.add(wing);
 
     airframe.add(
       new THREE.LineSegments(
@@ -1993,28 +1882,23 @@ export default function VirtualEngine() {
         ),
         wireMat
       )
-        .translateX(-1.6)
-        .translateY(0.1)
     );
 
-    // ========================================================
-    // BOOMS + TAIL
-    // ========================================================
+    // ======================================================
+    // BOOMS + V TAIL
+    // ======================================================
 
     const boomMat =
       new THREE.MeshStandardMaterial({
-        color:
-          0x6b7684,
-        metalness:
-          0.5,
-        roughness:
-          0.4,
+        color: 0x6b7684,
+        metalness: 0.5,
+        roughness: 0.4,
       });
 
-    for (
-      const side of [1, -1]
-    ) {
-
+    for (const side of [
+      1,
+      -1,
+    ]) {
       const boom =
         new THREE.Mesh(
           new THREE.CylinderGeometry(
@@ -2035,9 +1919,7 @@ export default function VirtualEngine() {
         side * 1.9
       );
 
-      airframe.add(
-        boom
-      );
+      airframe.add(boom);
 
       const finGeo =
         new THREE.BoxGeometry(
@@ -2061,14 +1943,12 @@ export default function VirtualEngine() {
       fin.rotation.x =
         side * 0.5;
 
-      airframe.add(
-        fin
-      );
+      airframe.add(fin);
     }
 
-    // ========================================================
+    // ======================================================
     // EO/IR TURRET
-    // ========================================================
+    // ======================================================
 
     const turret =
       new THREE.Mesh(
@@ -2090,9 +1970,9 @@ export default function VirtualEngine() {
       turret
     );
 
-    // ========================================================
-    // REAR PROPELLER
-    // ========================================================
+    // ======================================================
+    // PROPELLER
+    // ======================================================
 
     const propHub =
       new THREE.Mesh(
@@ -2117,10 +1997,10 @@ export default function VirtualEngine() {
       propHub.position
     );
 
-    for (
-      const a of [0, Math.PI]
-    ) {
-
+    for (const a of [
+      0,
+      Math.PI,
+    ]) {
       const blade =
         new THREE.Mesh(
           new THREE.BoxGeometry(
@@ -2148,75 +2028,57 @@ export default function VirtualEngine() {
       airframe
     );
 
-    // ========================================================
-    // MANUAL CAMERA ROTATION
-    // ========================================================
+    // ======================================================
+    // DRAG ROTATION
+    // ======================================================
 
-    let dragging =
-      false;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
 
-    let lastX =
-      0;
+    const onDown = (e) => {
+      dragging = true;
 
-    let lastY =
-      0;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    };
 
-    const onDown =
-      (e) => {
+    const onUp = () => {
+      dragging = false;
+    };
 
-        dragging =
-          true;
+    const onMove = (e) => {
+      if (!dragging)
+        return;
 
-        lastX =
-          e.clientX;
+      const dx =
+        e.clientX -
+        lastX;
 
-        lastY =
-          e.clientY;
-      };
+      const dy =
+        e.clientY -
+        lastY;
 
-    const onUp =
-      () => {
+      camTheta -=
+        dx * 0.006;
 
-        dragging =
-          false;
-      };
+      camPhi = Math.max(
+        0.35,
+        Math.min(
+          1.5,
+          camPhi -
+            dy * 0.006
+        )
+      );
 
-    const onMove =
-      (e) => {
+      lastX =
+        e.clientX;
 
-        if (!dragging) {
-          return;
-        }
+      lastY =
+        e.clientY;
 
-        const dx =
-          e.clientX -
-          lastX;
-
-        const dy =
-          e.clientY -
-          lastY;
-
-        camTheta -=
-          dx * 0.006;
-
-        camPhi =
-          Math.max(
-            0.35,
-            Math.min(
-              1.5,
-              camPhi -
-                dy * 0.006
-            )
-          );
-
-        lastX =
-          e.clientX;
-
-        lastY =
-          e.clientY;
-
-        updateCamera();
-      };
+      updateCamera();
+    };
 
     renderer.domElement.addEventListener(
       "pointerdown",
@@ -2233,375 +2095,326 @@ export default function VirtualEngine() {
       onMove
     );
 
-    // ========================================================
+    // ======================================================
     // RESIZE
-    // ========================================================
+    // ======================================================
 
-    const onResize =
-      () => {
+    const onResize = () => {
+      const w =
+        mount.clientWidth;
 
-        const w =
-          mount.clientWidth;
+      const h =
+        mount.clientHeight;
 
-        const h =
-          mount.clientHeight;
+      camera.aspect =
+        w / h;
 
-        camera.aspect =
-          w / h;
+      camera.updateProjectionMatrix();
 
-        camera.updateProjectionMatrix();
-
-        renderer.setSize(
-          w,
-          h
-        );
-      };
+      renderer.setSize(
+        w,
+        h
+      );
+    };
 
     window.addEventListener(
       "resize",
       onResize
     );
 
-    // ========================================================
-    // THREE REFERENCE
-    // ========================================================
+    // ======================================================
+    // SAVE THREE STATE
+    // ======================================================
 
     threeRef.current = {
-
       scene,
       camera,
       renderer,
       engine,
       airframe,
-
       cylMats,
-
       exhaustMat,
-
       sumpMat,
-
       flywheel,
-
       propGroup,
 
       latest: {
         reading:
-          simRef.current.reading,
-        score:
-          0,
-        fault:
-          "none",
+          simRef.current
+            .reading,
+
+        score: 0,
+
+        fault: "none",
+
         mission:
           "normal_cruise",
       },
     };
 
-    // ========================================================
+    // ======================================================
     // ANIMATION LOOP
-    // ========================================================
+    // ======================================================
 
     let raf;
 
     const clock =
       new THREE.Clock();
 
-    const animate =
-      () => {
+    const animate = () => {
+      raf =
+        requestAnimationFrame(
+          animate
+        );
 
-        raf =
-          requestAnimationFrame(
-            animate
+      const dt =
+        clock.getDelta();
+
+      const {
+        reading,
+        score,
+        fault,
+        mission,
+      } =
+        threeRef.current
+          .latest;
+
+      const t =
+        threeRef.current;
+
+      t.flightT =
+        (t.flightT || 0) +
+        dt;
+
+      const ft =
+        t.flightT;
+
+      // ====================================================
+      // FLIGHT MOTION
+      // ====================================================
+
+      let bobAmp = 0.05;
+      let bobSpeed = 0.6;
+      let bankAmp = 0.03;
+      let pitchAmp = 0.02;
+      let driftSpeed = 0.5;
+
+      if (
+        mission ===
+        "high_altitude"
+      ) {
+        bobAmp = 0.03;
+        bobSpeed = 0.35;
+        bankAmp = 0.015;
+      } else if (
+        mission ===
+        "hot_weather"
+      ) {
+        bobAmp = 0.11;
+        bobSpeed = 0.9;
+        bankAmp = 0.05;
+      } else if (
+        mission ===
+        "rapid_throttle"
+      ) {
+        bobAmp = 0.06;
+        bobSpeed = 1.6;
+        bankAmp = 0.09;
+        pitchAmp = 0.06;
+        driftSpeed = 1.3;
+      }
+
+      const flyY =
+        Math.sin(
+          ft * bobSpeed
+        ) *
+        bobAmp;
+
+      const flyBank =
+        Math.sin(
+          ft *
+            driftSpeed *
+            0.7
+        ) *
+        bankAmp;
+
+      const flyPitch =
+        Math.cos(
+          ft *
+            driftSpeed *
+            0.5
+        ) *
+        pitchAmp;
+
+      [
+        t.airframe,
+        t.engine,
+      ].forEach(
+        (obj) => {
+          obj.rotation.z =
+            flyBank;
+
+          obj.rotation.x =
+            flyPitch;
+        }
+      );
+
+      t.airframe.position.y =
+        flyY;
+
+      // ====================================================
+      // CHT COLOR
+      // ====================================================
+
+      const chtT =
+        normalize(
+          reading.cht_c,
+          [100, 150]
+        );
+
+      const chtColor =
+        lerpColor(
+          "#6b7684",
+          "#ff5b5b",
+          chtT
+        );
+
+      const idleGlow =
+        new THREE.Color(
+          0x2a1a10
+        );
+
+      t.cylMats.forEach(
+        (m) => {
+          m.color.copy(
+            chtColor
           );
 
-        const dt =
-          clock.getDelta();
+          m.emissive
+            .copy(idleGlow)
+            .lerp(
+              chtColor,
+              Math.max(
+                0.25,
+                chtT
+              )
+            )
+            .multiplyScalar(
+              0.3 +
+                chtT * 0.5
+            );
+        }
+      );
 
-        const {
-          reading,
-          score,
-          fault,
-          mission,
-        } =
-          threeRef.current.latest;
+      // ====================================================
+      // EGT
+      // ====================================================
 
-        const t =
-          threeRef.current;
+      const egtT =
+        normalize(
+          reading.egt_c,
+          [650, 850]
+        );
 
-        t.flightT =
-          (t.flightT || 0) +
-          dt;
+      const egtColor =
+        lerpColor(
+          "#3a3f45",
+          "#ff7a3c",
+          egtT
+        );
 
-        const ft =
-          t.flightT;
+      t.exhaustMat.color.copy(
+        egtColor
+      );
 
-        // ====================================================
-        // FLIGHT MOTION
-        // ====================================================
+      t.exhaustMat.emissive
+        .copy(egtColor)
+        .multiplyScalar(
+          egtT * 0.9
+        );
 
-        let bobAmp =
-          0.05;
+      // ====================================================
+      // OIL
+      // ====================================================
 
-        let bobSpeed =
-          0.6;
+      const oilPressT =
+        1 -
+        normalize(
+          reading.oil_press_bar,
+          [1.0, 3.0]
+        );
 
-        let bankAmp =
-          0.03;
+      const oilColor =
+        lerpColor(
+          "#2f5f8a",
+          "#ffb648",
+          oilPressT
+        );
 
-        let pitchAmp =
-          0.02;
+      t.sumpMat.color.copy(
+        oilColor
+      );
 
-        let driftSpeed =
+      t.sumpMat.emissive
+        .copy(oilColor)
+        .multiplyScalar(
+          oilPressT * 0.5
+        );
+
+      // ====================================================
+      // ROTATION
+      // ====================================================
+
+      const rpmFrac =
+        reading.rpm / 5500;
+
+      t.flywheel.rotation.y +=
+        dt *
+        rpmFrac *
+        14;
+
+      t.propGroup.rotation.x +=
+        dt *
+        rpmFrac *
+        30;
+
+      // ====================================================
+      // VIBRATION
+      // ====================================================
+
+      const vib =
+        reading.vibration_g;
+
+      t.engine.position.x =
+        (Math.random() - 0.5) *
+        vib *
+        1.2;
+
+      t.engine.position.z =
+        (Math.random() - 0.5) *
+        vib *
+        1.2;
+
+      t.engine.position.y =
+        flyY +
+        0.2 +
+        (Math.random() - 0.5) *
+          vib *
           0.5;
 
-        if (
-          mission ===
-          "high_altitude"
-        ) {
-
-          bobAmp =
-            0.03;
-
-          bobSpeed =
-            0.35;
-
-          bankAmp =
-            0.015;
-
-        } else if (
-          mission ===
-          "hot_weather"
-        ) {
-
-          bobAmp =
-            0.11;
-
-          bobSpeed =
-            0.9;
-
-          bankAmp =
-            0.05;
-
-        } else if (
-          mission ===
-          "rapid_throttle"
-        ) {
-
-          bobAmp =
-            0.06;
-
-          bobSpeed =
-            1.6;
-
-          bankAmp =
-            0.09;
-
-          pitchAmp =
-            0.06;
-
-          driftSpeed =
-            1.3;
-        }
-
-        const flyY =
-          Math.sin(
-            ft * bobSpeed
-          ) *
-          bobAmp;
-
-        const flyBank =
-          Math.sin(
-            ft *
-              driftSpeed *
-              0.7
-          ) *
-          bankAmp;
-
-        const flyPitch =
-          Math.cos(
-            ft *
-              driftSpeed *
-              0.5
-          ) *
-          pitchAmp;
-
-        [
-          t.airframe,
-          t.engine,
-        ].forEach(
-          (obj) => {
-
-            obj.rotation.z =
-              flyBank;
-
-            obj.rotation.x =
-              flyPitch;
-
-          }
-        );
-
-        t.airframe.position.y =
-          flyY;
-
-        // ====================================================
-        // CHT
-        // ====================================================
-
-        const chtT =
-          normalize(
-            reading.cht_c,
-            [100, 150]
-          );
-
-        const chtColor =
-          lerpColor(
-            "#6b7684",
-            "#ff5b5b",
-            chtT
-          );
-
-        const idleGlow =
-          new THREE.Color(
-            0x2a1a10
-          );
-
-        t.cylMats.forEach(
-          (m) => {
-
-            m.color.copy(
-              chtColor
-            );
-
-            m.emissive
-              .copy(idleGlow)
-              .lerp(
-                chtColor,
-                Math.max(
-                  0.25,
-                  chtT
-                )
-              )
-              .multiplyScalar(
-                0.3 +
-                  chtT *
-                    0.5
-              );
-          }
-        );
-
-        // ====================================================
-        // EGT
-        // ====================================================
-
-        const egtT =
-          normalize(
-            reading.egt_c,
-            [650, 850]
-          );
-
-        const egtColor =
-          lerpColor(
-            "#3a3f45",
-            "#ff7a3c",
-            egtT
-          );
-
-        t.exhaustMat.color.copy(
-          egtColor
-        );
-
-        t.exhaustMat.emissive
-          .copy(egtColor)
-          .multiplyScalar(
-            egtT * 0.9
-          );
-
-        // ====================================================
-        // OIL
-        // ====================================================
-
-        const oilPressT =
-          1 -
-          normalize(
-            reading.oil_press_bar,
-            [1.0, 3.0]
-          );
-
-        const oilColor =
-          lerpColor(
-            "#2f5f8a",
-            "#ffb648",
-            oilPressT
-          );
-
-        t.sumpMat.color.copy(
-          oilColor
-        );
-
-        t.sumpMat.emissive
-          .copy(oilColor)
-          .multiplyScalar(
-            oilPressT * 0.5
-          );
-
-        // ====================================================
-        // RPM SPIN
-        // ====================================================
-
-        const rpmFrac =
-          reading.rpm /
-          5500;
-
-        t.flywheel.rotation.y +=
-          dt *
-          rpmFrac *
-          14;
-
-        t.propGroup.rotation.x +=
-          dt *
-          rpmFrac *
-          30;
-
-        // ====================================================
-        // VIBRATION
-        // ====================================================
-
-        const vib =
-          reading.vibration_g;
-
-        t.engine.position.x =
-          (Math.random() -
-            0.5) *
-          vib *
-          1.2;
-
-        t.engine.position.z =
-          (Math.random() -
-            0.5) *
-          vib *
-          1.2;
-
-        t.engine.position.y =
-          flyY +
-          0.2 +
-          (Math.random() -
-            0.5) *
-            vib *
-            0.5;
-
-        renderer.render(
-          t.scene,
-          t.camera
-        );
-      };
+      renderer.render(
+        scene,
+        camera
+      );
+    };
 
     animate();
 
-    // ========================================================
+    // ======================================================
     // CLEANUP
-    // ========================================================
+    // ======================================================
 
     return () => {
-
       cancelAnimationFrame(
         raf
       );
@@ -2633,16 +2446,15 @@ export default function VirtualEngine() {
           renderer.domElement
         )
       ) {
-
         mount.removeChild(
           renderer.domElement
         );
       }
 
       if (
-        audioRef.current.ctx
+        audioRef.current
+          .ctx
       ) {
-
         audioRef.current.ctx.close();
       }
     };
@@ -2650,9 +2462,9 @@ export default function VirtualEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ==========================================================
+  // ========================================================
   // STATUS COLOR
-  // ==========================================================
+  // ========================================================
 
   const statusColor =
     status === "Normal"
@@ -2661,20 +2473,15 @@ export default function VirtualEngine() {
       ? COLORS.amber
       : COLORS.red;
 
-  // ==========================================================
-  // RETURN UI
-  // ==========================================================
+  // ========================================================
+  // UI
+  // ========================================================
 
   return (
-
     <div
-      style={
-        styles.wrap
-      }
+      style={styles.wrap}
     >
-
       <style>{`
-
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap');
 
         * {
@@ -2682,101 +2489,52 @@ export default function VirtualEngine() {
         }
 
         .egdt-btn {
-
-          font-family:
-            'Inter',
-            sans-serif;
-
-          font-size:
-            11.5px;
-
-          font-weight:
-            600;
-
-          letter-spacing:
-            0.02em;
-
-          padding:
-            7px 11px;
-
-          border-radius:
-            4px;
-
-          border:
-            1px solid
-            ${COLORS.panelBorder};
-
-          background:
-            #161d25;
-
-          color:
-            ${COLORS.textMuted};
-
-          cursor:
-            pointer;
-
-          transition:
-            all 0.15s ease;
-
-          white-space:
-            nowrap;
+          font-family: 'Inter', sans-serif;
+          font-size: 11.5px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          padding: 7px 11px;
+          border-radius: 4px;
+          border: 1px solid ${COLORS.panelBorder};
+          background: #161d25;
+          color: ${COLORS.textMuted};
+          cursor: pointer;
+          transition: all 0.15s ease;
+          white-space: nowrap;
         }
 
         .egdt-btn:hover {
-
-          border-color:
-            ${COLORS.cyan};
-
-          color:
-            ${COLORS.textPrimary};
+          border-color: ${COLORS.cyan};
+          color: ${COLORS.textPrimary};
         }
 
         .egdt-btn.active {
-
-          background:
-            ${COLORS.cyan};
-
-          color:
-            #06131a;
-
-          border-color:
-            ${COLORS.cyan};
+          background: ${COLORS.cyan};
+          color: #06131a;
+          border-color: ${COLORS.cyan};
         }
 
         .egdt-btn.fault-active {
-
-          background:
-            ${COLORS.red};
-
-          color:
-            #1a0606;
-
-          border-color:
-            ${COLORS.red};
+          background: ${COLORS.red};
+          color: #1a0606;
+          border-color: ${COLORS.red};
         }
-
       `}</style>
 
-      {/* ======================================================
+      {/* ===================================================
           HEADER
-      ====================================================== */}
+      =================================================== */}
 
-      <div
-        style={
-          styles.header
-        }
-      >
-
+      <div style={styles.header}>
         <div>
-
           <div
             style={
               styles.eyebrow
             }
           >
             VIRTUAL ENGINE
-            &middot;
-            PROPULSION HEALTH SYSTEM
+            &middot; PROPULSION
+            HEALTH SYSTEM
           </div>
 
           <div
@@ -2784,8 +2542,8 @@ export default function VirtualEngine() {
               styles.title
             }
           >
-            Aero Piston Engine
-            // Live Telemetry
+            Aero Piston Engine //
+            Live Telemetry
           </div>
 
           <div
@@ -2793,11 +2551,12 @@ export default function VirtualEngine() {
               styles.subtitle
             }
           >
-            Reference: Rotax 912 ULS operating limits
-            (RPM 5500 / CHT 150&deg;C / EGT 900&deg;C /
-            Oil 2&ndash;5 bar)
+            Reference: Rotax 912 ULS
+            operating limits (RPM
+            5500 / CHT 150&deg;C /
+            EGT 900&deg;C / Oil
+            2&ndash;5 bar)
           </div>
-
         </div>
 
         <div
@@ -2809,7 +2568,6 @@ export default function VirtualEngine() {
               statusColor,
           }}
         >
-
           <span
             style={{
               ...styles.statusDot,
@@ -2819,21 +2577,14 @@ export default function VirtualEngine() {
           />
 
           {status.toUpperCase()}
-
         </div>
-
       </div>
 
-      {/* ======================================================
+      {/* ===================================================
           MAIN
-      ====================================================== */}
+      =================================================== */}
 
-      <div
-        style={
-          styles.main
-        }
-      >
-
+      <div style={styles.main}>
         <div
           ref={mountRef}
           style={
@@ -2841,16 +2592,11 @@ export default function VirtualEngine() {
           }
         />
 
-        {/* ====================================================
-            SIDEBAR
-        ==================================================== */}
-
         <div
           style={
             styles.sidebar
           }
         >
-
           {/* DATA SOURCE */}
 
           <div
@@ -2863,7 +2609,6 @@ export default function VirtualEngine() {
                 "center",
             }}
           >
-
             <div
               style={
                 styles.panelLabel
@@ -2874,10 +2619,8 @@ export default function VirtualEngine() {
 
             <span
               style={{
-                fontSize:
-                  9,
-                fontWeight:
-                  700,
+                fontSize: 9,
+                fontWeight: 700,
                 letterSpacing:
                   "0.06em",
                 color:
@@ -2887,7 +2630,6 @@ export default function VirtualEngine() {
                     : COLORS.amber,
               }}
             >
-
               {dataSourceStatus.startsWith(
                 "Live"
               )
@@ -2897,19 +2639,14 @@ export default function VirtualEngine() {
                   )
                 ? "● SIGNAL LOST"
                 : "● MOCK"}
-
             </span>
-
           </div>
 
           <div
             style={{
-              fontSize:
-                9.5,
-              color:
-                "#4a5665",
-              marginBottom:
-                6,
+              fontSize: 9.5,
+              color: "#4a5665",
+              marginBottom: 6,
             }}
           >
             {dataSourceStatus}
@@ -2919,22 +2656,17 @@ export default function VirtualEngine() {
             style={{
               display:
                 "flex",
-              gap:
-                6,
-              marginBottom:
-                4,
+              gap: 6,
+              marginBottom: 4,
             }}
           >
-
             <button
-              className={
-                `egdt-btn${
-                  hardwareMode ===
-                  "live"
-                    ? " active"
-                    : ""
-                }`
-              }
+              className={`egdt-btn${
+                hardwareMode ===
+                "live"
+                  ? " active"
+                  : ""
+              }`}
               style={{
                 flex: 1,
               }}
@@ -2948,14 +2680,12 @@ export default function VirtualEngine() {
             </button>
 
             <button
-              className={
-                `egdt-btn${
-                  hardwareMode ===
-                  "mock"
-                    ? " active"
-                    : ""
-                }`
-              }
+              className={`egdt-btn${
+                hardwareMode ===
+                "mock"
+                  ? " active"
+                  : ""
+              }`}
               style={{
                 flex: 1,
               }}
@@ -2967,24 +2697,22 @@ export default function VirtualEngine() {
             >
               Mock Data
             </button>
-
           </div>
 
           <div
             style={{
-              fontSize:
-                8.5,
-              color:
-                "#4a5665",
-              marginBottom:
-                12,
-              lineHeight:
-                1.4,
+              fontSize: 8.5,
+              color: "#4a5665",
+              marginBottom: 12,
+              lineHeight: 1.4,
             }}
           >
-            If the ESP32 disconnects or misbehaves mid-demo,
-            click "Mock Data" to fall back instantly without
-            touching code.
+            If the ESP32
+            disconnects or
+            misbehaves mid-demo,
+            click "Mock Data" to
+            fall back instantly
+            without touching code.
           </div>
 
           {/* TELEMETRY */}
@@ -2999,7 +2727,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="RPM"
-            value={telemetry.rpm?.toFixed(0)}
+            value={telemetry.rpm?.toFixed(
+              0
+            )}
             unit=""
             limit="5500 max"
             source={
@@ -3013,7 +2743,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="CHT"
-            value={telemetry.cht_c?.toFixed(1)}
+            value={telemetry.cht_c?.toFixed(
+              1
+            )}
             unit="°C"
             limit="150 max"
             source={
@@ -3027,7 +2759,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="EGT"
-            value={telemetry.egt_c?.toFixed(1)}
+            value={telemetry.egt_c?.toFixed(
+              1
+            )}
             unit="°C"
             limit="900 max"
             source="SIM"
@@ -3035,7 +2769,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Oil Press"
-            value={telemetry.oil_press_bar?.toFixed(2)}
+            value={telemetry.oil_press_bar?.toFixed(
+              2
+            )}
             unit="bar"
             limit="2.0-5.0"
             source="SIM"
@@ -3043,7 +2779,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Oil Temp"
-            value={telemetry.oil_temp_c?.toFixed(1)}
+            value={telemetry.oil_temp_c?.toFixed(
+              1
+            )}
             unit="°C"
             limit="150 max"
             source="SIM"
@@ -3051,7 +2789,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Fuel Flow"
-            value={telemetry.fuel_flow_lph?.toFixed(1)}
+            value={telemetry.fuel_flow_lph?.toFixed(
+              1
+            )}
             unit="L/h"
             limit="ref."
             source="SIM"
@@ -3059,7 +2799,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Vibration"
-            value={telemetry.vibration_g?.toFixed(3)}
+            value={telemetry.vibration_g?.toFixed(
+              3
+            )}
             unit="g"
             limit="ref."
             source={
@@ -3073,7 +2815,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Roll"
-            value={telemetry.roll_deg?.toFixed(1)}
+            value={telemetry.roll_deg?.toFixed(
+              1
+            )}
             unit="°"
             limit="±25 typical"
             source={
@@ -3087,7 +2831,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Pitch"
-            value={telemetry.pitch_deg?.toFixed(1)}
+            value={telemetry.pitch_deg?.toFixed(
+              1
+            )}
             unit="°"
             limit="±25 typical"
             source={
@@ -3101,7 +2847,9 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Yaw"
-            value={telemetry.yaw_deg?.toFixed(1)}
+            value={telemetry.yaw_deg?.toFixed(
+              1
+            )}
             unit="°"
             limit="drifts, gyro-only"
             source={
@@ -3115,19 +2863,20 @@ export default function VirtualEngine() {
 
           <TelemetryRow
             label="Battery"
-            value={telemetry.battery_v?.toFixed(2)}
+            value={telemetry.battery_v?.toFixed(
+              2
+            )}
             unit="V"
             limit="13.8-14.4"
             source="SIM"
           />
 
-          {/* ANOMALY SCORE */}
+          {/* ANOMALY */}
 
           <div
             style={{
               ...styles.panelLabel,
-              marginTop:
-                16,
+              marginTop: 16,
             }}
           >
             ANOMALY SCORE
@@ -3138,29 +2887,27 @@ export default function VirtualEngine() {
               styles.scoreBarTrack
             }
           >
-
             <div
               style={{
                 ...styles.scoreBarFill,
-                width:
-                  `${anomalyScore * 100}%`,
+                width: `${
+                  anomalyScore *
+                  100
+                }%`,
                 background:
                   statusColor,
               }}
             />
-
           </div>
 
           <div
             style={{
               fontFamily:
                 "'JetBrains Mono', monospace",
-              fontSize:
-                12,
+              fontSize: 12,
               color:
                 statusColor,
-              marginTop:
-                4,
+              marginTop: 4,
             }}
           >
             {anomalyScore.toFixed(
@@ -3173,8 +2920,7 @@ export default function VirtualEngine() {
           <div
             style={{
               ...styles.panelLabel,
-              marginTop:
-                16,
+              marginTop: 16,
             }}
           >
             MISSION RELIABILITY
@@ -3196,27 +2942,23 @@ export default function VirtualEngine() {
           >
             {reliability}
           </div>
-
         </div>
-
       </div>
 
-      {/* ======================================================
+      {/* ===================================================
           CONTROLS
-      ====================================================== */}
+      =================================================== */}
 
       <div
         style={
           styles.controls
         }
       >
-
         <div
           style={
             styles.controlGroup
           }
         >
-
           <div
             style={
               styles.controlLabel
@@ -3230,22 +2972,16 @@ export default function VirtualEngine() {
               styles.btnRow
             }
           >
-
             {MISSION_PROFILES.map(
               (m) => (
-
                 <button
-                  key={
+                  key={m.id}
+                  className={`egdt-btn ${
+                    missionProfile ===
                     m.id
-                  }
-                  className={
-                    `egdt-btn ${
-                      missionProfile ===
-                      m.id
-                        ? "active"
-                        : ""
-                    }`
-                  }
+                      ? "active"
+                      : ""
+                  }`}
                   onClick={() =>
                     setMission(
                       m.id
@@ -3254,12 +2990,9 @@ export default function VirtualEngine() {
                 >
                   {m.label}
                 </button>
-
               )
             )}
-
           </div>
-
         </div>
 
         <div
@@ -3267,7 +3000,6 @@ export default function VirtualEngine() {
             styles.controlGroup
           }
         >
-
           <div
             style={
               styles.controlLabel
@@ -3282,25 +3014,19 @@ export default function VirtualEngine() {
               styles.btnRow
             }
           >
-
             {FAULT_TYPES.map(
               (f) => (
-
                 <button
-                  key={
+                  key={f.id}
+                  className={`egdt-btn ${
+                    activeFault ===
                     f.id
-                  }
-                  className={
-                    `egdt-btn ${
-                      activeFault ===
-                      f.id
-                        ? f.id ===
-                          "none"
-                          ? "active"
-                          : "fault-active"
-                        : ""
-                    }`
-                  }
+                      ? f.id ===
+                        "none"
+                        ? "active"
+                        : "fault-active"
+                      : ""
+                  }`}
                   onClick={() =>
                     setFault(
                       f.id
@@ -3309,7 +3035,6 @@ export default function VirtualEngine() {
                 >
                   {f.label}
                 </button>
-
               )
             )}
 
@@ -3327,13 +3052,11 @@ export default function VirtualEngine() {
             </button>
 
             <button
-              className={
-                `egdt-btn ${
-                  soundOn
-                    ? "active"
-                    : ""
-                }`
-              }
+              className={`egdt-btn ${
+                soundOn
+                  ? "active"
+                  : ""
+              }`}
               onClick={
                 toggleSound
               }
@@ -3342,37 +3065,39 @@ export default function VirtualEngine() {
                 ? "Sound: On"
                 : "Enable Sound"}
             </button>
-
           </div>
-
         </div>
-
       </div>
 
-      {/* ======================================================
+      {/* ===================================================
           FOOTNOTE
-      ====================================================== */}
+      =================================================== */}
 
       <div
         style={
           styles.footnote
         }
       >
-        Drag to rotate. Twin-boom, rear pusher-prop
-        configuration and EO/IR nose turret match real
-        Indian MALE UAV airframes. The translucent fuselage
-        is a cutaway so the piston engine and its live health
-        status stay visible. Values are simulated internally,
-        grounded in published reference ranges.
+        Drag to rotate. Twin-boom,
+        rear pusher-prop
+        configuration and EO/IR
+        nose turret match real
+        Indian MALE UAV airframes.
+        The translucent fuselage
+        is a cutaway so the piston
+        engine and its live health
+        status stay visible. Values
+        are simulated internally,
+        grounded in published
+        reference ranges.
       </div>
-
     </div>
   );
 }
 
-// ============================================================
+// ==========================================================
 // TELEMETRY ROW
-// ============================================================
+// ==========================================================
 
 function TelemetryRow({
   label,
@@ -3381,48 +3106,39 @@ function TelemetryRow({
   limit,
   source,
 }) {
-
   return (
-
     <div
       style={
         styles.telRow
       }
     >
-
       <span
         style={
           styles.telLabel
         }
       >
-
         {label}{" "}
 
         <span
           style={{
-            fontSize:
-              8.5,
-            fontWeight:
-              700,
+            fontSize: 8.5,
+            fontWeight: 700,
             padding:
               "1px 4px",
-            borderRadius:
-              3,
+            borderRadius: 3,
             color:
               source === "HW"
                 ? COLORS.green
                 : COLORS.textMuted,
-            border:
-              `1px solid ${
-                source === "HW"
-                  ? COLORS.green
-                  : "#2a3542"
-              }`,
+            border: `1px solid ${
+              source === "HW"
+                ? COLORS.green
+                : "#2a3542"
+            }`,
           }}
         >
           {source}
         </span>
-
       </span>
 
       <span
@@ -3430,18 +3146,15 @@ function TelemetryRow({
           styles.telValue
         }
       >
-
-        {value}
+        {value}{" "}
 
         <span
           style={
             styles.telUnit
           }
         >
-          {" "}
           {unit}
         </span>
-
       </span>
 
       <span
@@ -3451,19 +3164,16 @@ function TelemetryRow({
       >
         {limit}
       </span>
-
     </div>
   );
 }
 
-// ============================================================
+// ==========================================================
 // STYLES
-// ============================================================
+// ==========================================================
 
 const styles = {
-
   wrap: {
-
     fontFamily:
       "'Inter', sans-serif",
 
@@ -3473,50 +3183,39 @@ const styles = {
     color:
       COLORS.textPrimary,
 
-    borderRadius:
-      8,
+    borderRadius: 8,
 
-    border:
-      `1px solid ${COLORS.panelBorder}`,
+    border: `1px solid ${COLORS.panelBorder}`,
 
-    overflow:
-      "hidden",
+    overflow: "hidden",
 
-    display:
-      "flex",
+    display: "flex",
 
     flexDirection:
       "column",
 
-    minHeight:
-      620,
+    minHeight: 620,
   },
 
   header: {
-
-    display:
-      "flex",
+    display: "flex",
 
     justifyContent:
       "space-between",
 
-    alignItems:
-      "center",
+    alignItems: "center",
 
     padding:
       "14px 18px",
 
-    borderBottom:
-      `1px solid ${COLORS.panelBorder}`,
+    borderBottom: `1px solid ${COLORS.panelBorder}`,
 
     background:
       "#0d1319",
   },
 
   eyebrow: {
-
-    fontSize:
-      10.5,
+    fontSize: 10.5,
 
     letterSpacing:
       "0.12em",
@@ -3524,134 +3223,99 @@ const styles = {
     color:
       COLORS.cyan,
 
-    fontWeight:
-      600,
+    fontWeight: 600,
 
-    marginBottom:
-      3,
+    marginBottom: 3,
   },
 
   title: {
+    fontSize: 16,
 
-    fontSize:
-      16,
-
-    fontWeight:
-      700,
+    fontWeight: 700,
 
     color:
       COLORS.textPrimary,
   },
 
   subtitle: {
-
-    fontSize:
-      10,
+    fontSize: 10,
 
     color:
       "#4a5665",
 
-    marginTop:
-      3,
+    marginTop: 3,
 
     fontFamily:
       "'JetBrains Mono', monospace",
   },
 
   statusBadge: {
+    display: "flex",
 
-    display:
-      "flex",
+    alignItems: "center",
 
-    alignItems:
-      "center",
-
-    gap:
-      7,
+    gap: 7,
 
     fontFamily:
       "'JetBrains Mono', monospace",
 
-    fontSize:
-      12,
+    fontSize: 12,
 
-    fontWeight:
-      700,
+    fontWeight: 700,
 
     letterSpacing:
       "0.05em",
 
-    border:
-      "1px solid",
+    border: "1px solid",
 
-    borderRadius:
-      20,
+    borderRadius: 20,
 
     padding:
       "5px 12px",
   },
 
   statusDot: {
+    width: 7,
 
-    width:
-      7,
+    height: 7,
 
-    height:
-      7,
-
-    borderRadius:
-      "50%",
+    borderRadius: "50%",
   },
 
   main: {
+    display: "flex",
 
-    display:
-      "flex",
+    flex: 1,
 
-    flex:
-      1,
-
-    minHeight:
-      420,
+    minHeight: 420,
   },
 
   viewport: {
+    flex: 1,
 
-    flex:
-      1,
+    minWidth: 0,
 
-    minWidth:
-      0,
+    position: "relative",
 
-    position:
-      "relative",
-
-    cursor:
-      "grab",
+    cursor: "grab",
   },
 
   sidebar: {
-
-    width:
-      250,
+    width: 250,
 
     padding:
       "16px 16px",
 
-    borderLeft:
-      `1px solid ${COLORS.panelBorder}`,
+    borderLeft: `1px solid ${COLORS.panelBorder}`,
 
     background:
       COLORS.panel,
 
-    overflowY:
-      "auto",
+    overflowY: "auto",
   },
 
   panelLabel: {
-
-    fontSize:
-      10.5,
+    fontSize: 10.5,
 
     letterSpacing:
       "0.1em",
@@ -3659,17 +3323,13 @@ const styles = {
     color:
       COLORS.textMuted,
 
-    fontWeight:
-      700,
+    fontWeight: 700,
 
-    marginBottom:
-      8,
+    marginBottom: 8,
   },
 
   telRow: {
-
-    display:
-      "grid",
+    display: "grid",
 
     gridTemplateColumns:
       "62px 1fr 58px",
@@ -3685,99 +3345,75 @@ const styles = {
   },
 
   telLabel: {
-
-    fontSize:
-      11.5,
+    fontSize: 11.5,
 
     color:
       COLORS.textMuted,
 
-    fontWeight:
-      500,
+    fontWeight: 500,
   },
 
   telValue: {
-
     fontFamily:
       "'JetBrains Mono', monospace",
 
-    fontSize:
-      13,
+    fontSize: 13,
 
     color:
       COLORS.textPrimary,
 
-    fontWeight:
-      500,
+    fontWeight: 500,
 
-    textAlign:
-      "right",
+    textAlign: "right",
   },
 
   telUnit: {
-
-    fontSize:
-      10,
+    fontSize: 10,
 
     color:
       COLORS.textMuted,
   },
 
   telLimit: {
-
-    fontSize:
-      9.5,
+    fontSize: 9.5,
 
     color:
       "#4a5665",
 
-    textAlign:
-      "right",
+    textAlign: "right",
   },
 
   scoreBarTrack: {
+    width: "100%",
 
-    width:
-      "100%",
+    height: 6,
 
-    height:
-      6,
-
-    borderRadius:
-      3,
+    borderRadius: 3,
 
     background:
       "#1a222c",
 
-    overflow:
-      "hidden",
+    overflow: "hidden",
   },
 
   scoreBarFill: {
-
-    height:
-      "100%",
+    height: "100%",
 
     transition:
       "width 0.2s ease",
   },
 
   reliabilityText: {
-
-    fontSize:
-      11.5,
+    fontSize: 11.5,
 
     color:
       COLORS.textMuted,
 
-    lineHeight:
-      1.5,
+    lineHeight: 1.5,
   },
 
   controls: {
-
-    borderTop:
-      `1px solid ${COLORS.panelBorder}`,
+    borderTop: `1px solid ${COLORS.panelBorder}`,
 
     background:
       "#0d1319",
@@ -3785,32 +3421,25 @@ const styles = {
     padding:
       "12px 18px",
 
-    display:
-      "flex",
+    display: "flex",
 
     flexDirection:
       "column",
 
-    gap:
-      10,
+    gap: 10,
   },
 
   controlGroup: {
-
-    display:
-      "flex",
+    display: "flex",
 
     flexDirection:
       "column",
 
-    gap:
-      6,
+    gap: 6,
   },
 
   controlLabel: {
-
-    fontSize:
-      9.5,
+    fontSize: 9.5,
 
     letterSpacing:
       "0.1em",
@@ -3818,26 +3447,19 @@ const styles = {
     color:
       COLORS.textMuted,
 
-    fontWeight:
-      700,
+    fontWeight: 700,
   },
 
   btnRow: {
+    display: "flex",
 
-    display:
-      "flex",
+    flexWrap: "wrap",
 
-    flexWrap:
-      "wrap",
-
-    gap:
-      6,
+    gap: 6,
   },
 
   footnote: {
-
-    fontSize:
-      10,
+    fontSize: 10,
 
     color:
       "#4a5665",
@@ -3845,8 +3467,6 @@ const styles = {
     padding:
       "8px 18px 12px",
 
-    lineHeight:
-      1.5,
+    lineHeight: 1.5,
   },
-
 };
