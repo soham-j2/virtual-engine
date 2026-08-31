@@ -141,7 +141,7 @@ const RAW_HARDWARE_RANGE = {
 };
 
 const MAPPED_TARGET_RANGE = {
-  rpm: [4800, 5500],
+  rpm: [0, 5500], // exception: min raw (0) now maps to display 0. Max unchanged.
   cht_c: [95, 150],
   vibration_g: [0.05, 0.3],
 };
@@ -1212,6 +1212,9 @@ export default function VirtualEngine() {
           margin: 0;
           padding: 0;
           height: 100%;
+          width: 100%;
+          max-width: none;
+          text-align: left;
           overflow: hidden;
         }
 
@@ -1541,6 +1544,7 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    width: "100%",
     height: "100vh",
     maxHeight: "100vh",
   },
